@@ -39,6 +39,7 @@ def bar(x: float, y: float, c0: tuple, c1: tuple, c2: tuple):
 def parse_obj_complete(path):
     vertices = []
     faces = []
+    texture = []
     
     with open(path, 'r') as file:
         for line in file:
@@ -49,12 +50,69 @@ def parse_obj_complete(path):
                 vertices.append([float(line[1]), float(line[2]), float(line[3])])
             elif line[0] == 'f': 
                 face_vertices = []
+                coord_texture = []
                 for item in line[1:]:
-                    vertex_index = int(item.split('/')[0]) - 1 
-                    face_vertices.append(vertex_index)
-                faces.append(face_vertices)
+                    face_vertices.append(int(item.split('/')[0]) - 1)
+                    coord_texture.append(int(item.split('/')[1]) - 1)
+                faces.append([face_vertices, coord_texture])
+            elif line[0] == 'vt':
+                texture.append([float(line[1]), float(line[2])])
+            
+    return vertices, faces, texture
+
+def normalize_vector(v):
+    norm = np.linalg.norm(v)
+    if norm > 0:
+        return v / norm
+    return v
+
+def compute_vertex_normals(vertices, faces):
     
-    return vertices, faces
+    vertex_normals = [np.zeros(3, dtype=float) for _ in range(len(vertices))]
+    
+    vertex_face_count = [0] * len(vertices)
+    
+    for face in faces:
+        
+        v0_idx, v1_idx, v2_idx = face[0][0], face[0][1], face[0][2]
+        
+        v0 = np.array(vertices[v0_idx])
+        v1 = np.array(vertices[v1_idx])
+        v2 = np.array(vertices[v2_idx])
+        
+        face_normal = np.cross(v1 - v0, v2 - v0)
+        
+        norm_v = np.linalg.norm(face_normal)
+        
+        face_normal = face_normal / norm_v
+        
+        vertex_normals[v0_idx] += face_normal
+        vertex_normals[v1_idx] += face_normal
+        vertex_normals[v2_idx] += face_normal
+        
+        vertex_face_count[v0_idx] += 1
+        vertex_face_count[v1_idx] += 1
+        vertex_face_count[v2_idx] += 1
+    
+    for i in range(len(vertex_normals)):
+        
+        vertex_normals[i] = vertex_normals[i] / vertex_face_count[i]
+        
+        norm_v = np.linalg.norm(vertex_normals[i])
+        
+        vertex_normals[i] = vertex_normals[i] / norm_v
+        
+    
+    return vertex_normals
+
+def compute_vertex_illumination(vertex_normal, light):
+   
+    n = normalize_vector(vertex_normal)
+    l = normalize_vector(light)
+    
+    illumination = np.dot(n, l)
+    
+    return max(0, min(1, illumination))
 
 def calculate_model_bounds(vertices):
     if not vertices:
@@ -65,9 +123,8 @@ def calculate_model_bounds(vertices):
     
     return min(xs), max(xs), min(ys), max(ys)
 
-def draw_picture(vertices, faces, output_path, image_size=1000):
+def draw_picture(vertices, faces, texture, output_path, image_size=1000):
     H = W = image_size
-    
     image_array = np.zeros((H, W, 3), dtype=np.uint8)
     
     min_x, max_x, min_y, max_y = calculate_model_bounds(vertices)
@@ -82,24 +139,39 @@ def draw_picture(vertices, faces, output_path, image_size=1000):
     center_y = (min_y + max_y) / 2
     offset_x = W // 2 
     offset_y = H // 2 
+    
+    light = (0.3, 1, -1)
+    
     z_buf = np.full((H, W), 1000000, dtype=np.float32)
+    
+    text_img = Image.open("./assets/bunny.jpg")
+    tex_width, tex_hieght = text_img.size
     
     vertices = spin(vertices, 0, 90, 0, center_x, center_y, 0.1)
     
+    vertex_normals = compute_vertex_normals(vertices, faces)    
+    
     for face in faces:
         
-        
-        v1_idx = face[0]
-        v2_idx = face[1]
-        v3_idx = face[2]
+        v1_idx, v2_idx, v3_idx = face[0][0], face[0][1], face[0][2]
         
         x1, y1, z1 = vertices[v1_idx]
         x2, y2, z2 = vertices[v2_idx]
         x3, y3, z3 = vertices[v3_idx]
         
+        v1t_idx, v2t_idx, v3t_idx = face[1][0], face[1][1], face[1][2]
+        
+        t_x1,t_y1 = texture[v1t_idx]
+        t_x2,t_y2 = texture[v2t_idx]
+        t_x3,t_y3 = texture[v3t_idx]
+        
         c = scalar(normal((x1, y1, z1), (x2, y2, z2), (x3, y3, z3)))
         
         if(c >= 0): continue
+        
+        I0 = compute_vertex_illumination(vertex_normals[v1_idx], light)
+        I1 = compute_vertex_illumination(vertex_normals[v2_idx], light)
+        I2 = compute_vertex_illumination(vertex_normals[v3_idx], light)
         
         img_x1 = x1 * scale / z1 + offset_x
         img_y1 = y1 * scale / z1 + offset_y
@@ -122,8 +194,21 @@ def draw_picture(vertices, faces, output_path, image_size=1000):
                     z = cord[0] * z1 + cord[1] * z2 + cord[2] * z3
                     try:
                         if (z < z_buf[H - y, x]):
+                            
+                            I = (cord[0] * I0 + cord[1] * I1 + cord[2] * I2)
+                            
+                            x_t = (tex_width-1) * (cord[0] * t_x1 + cord[1] * t_x2 + cord[2] * t_x3)
+                            y_t =  (tex_hieght-1) * (cord[0] * t_y1 + cord[1] * t_y2 + cord[2] * t_y3)
+                                            
+                            x_t = int(x_t)
+                            y_t = int(y_t)
+                            
+                            clr_val = text_img.getpixel((x_t, tex_hieght -1 - y_t))
+                            color = (clr_val[0] * I, clr_val[1] * I, clr_val[2] *I)
+                            
                             image_array[H - y, x] = color
                             z_buf[H - y, x] = z
+                            
                     except:
                         continue
         
@@ -133,11 +218,12 @@ def draw_picture(vertices, faces, output_path, image_size=1000):
     image.save(output_path)
 
 
+
 def main():
     obj_path = './obj/model_1.obj'
-    vertices, faces = parse_obj_complete(obj_path)
-
-    draw_picture(vertices, faces, './assets/rab2.png')
+    vertices, faces, texture = parse_obj_complete(obj_path)
+  
+    draw_picture(vertices, faces, texture, './assets/rab2.png')
     
 
 if __name__ == "__main__":
